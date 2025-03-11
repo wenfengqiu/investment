@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
+import datetime
 from finance_constants import *
 
 dat = yf.Ticker("RKLB")
@@ -47,33 +48,45 @@ def calculate_covered_call_return(df, current_price, risk_free_rate=None):
     if risk_free_rate is None:
         risk_free_rate = RISK_FREE_RATE
 
-    # Assume the premium received immediately is invested in risk-free assets
+    # assume the premium received immediately is invested in risk-free assets
+    # the max ensures non-negative return when exercised
+    # negative return occurs when strike price + premium < current price
+    # so "return_if_exercised = 0" when call buyers can do arbitrage
     df["return_if_exercised"] = (
         np.maximum(
             df["adjusted_price"]
             * ((1 + risk_free_rate) ** (df["days_to_expiration"] / 365))
             + df["strike_price"],
-            0,
+            current_price,
         )
         / current_price
-        - 1
-    )
+    ) ** (365 / df["days_to_expiration"]) - 1
 
-    # Drawdown at breakeven
+    # drawdown at breakeven
+    # decrease of the stock price that yields breakeven from covered call
+    # the max ensures no abitrage for covered call seller
+    # so "drawdown_at_breakeven" = 1 when arbitrage
     df["drawdown_at_breakeven"] = -(
-        np.maximum(
-            current_price
-            - df["adjusted_price"]
-            * ((1 + risk_free_rate) ** (df["days_to_expiration"] / 365)),
-            0,
+        (
+            (
+                np.maximum(
+                    current_price
+                    - df["adjusted_price"]
+                    * ((1 + risk_free_rate) ** (df["days_to_expiration"] / 365)),
+                    0,
+                )
+                / current_price
+            )
+            ** (365 / df["days_to_expiration"])
         )
-        / current_price
+        - 1
     )
 
     return df
 
 
 def find_outliers(df):
+    # currently only label "return_if_exercised"=inf as outliers
     df = df.copy()
     df["outlier"] = False
     df.loc[~np.isfinite(df["return_if_exercised"]), "outlier"] = True
@@ -107,7 +120,6 @@ def plot_scatter_by_pareto(df, col_x, col_y):
     )
     plt.xlabel(col_x)
     plt.ylabel(col_y)
-    plt.show()
 
 
 def generate_report(
@@ -122,7 +134,9 @@ def generate_report(
     df_clean = clean_option_chain_data(df)
     df_clean = df_clean.loc[df_clean["option_type"] == "call"]
 
-    df_call = calculate_covered_call_return(df_clean, current_price, risk_free_rate)
+    df_call = calculate_covered_call_return(
+        df=df_clean, current_price=current_price, risk_free_rate=risk_free_rate
+    )
     df_call = df_call.loc[df_call["bid"] > 0]
     df_call = df_call.loc[
         (df_call["return_if_exercised"] > risk_free_rate)
@@ -133,5 +147,12 @@ def generate_report(
     df_call = find_pareto_frontier(
         df_call, "drawdown_at_breakeven", "return_if_exercised"
     )
-
+    timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H")
+    filename = f"{ticker}_{timestamp}.csv"
+    df_call.to_csv("reports/" + filename, index=False)
     return df_call
+
+
+# generate reports
+temp = generate_report("RKLB")
+plot_scatter_by_pareto(temp, "drawdown_at_breakeven", "return_if_exercised")
